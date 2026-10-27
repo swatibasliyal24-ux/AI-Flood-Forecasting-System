@@ -25,7 +25,7 @@ import importlib
 import src.stage5_gis_warning
 importlib.reload(src.stage5_gis_warning)
 from src.stage5_gis_warning import generate_gis_map, generate_early_warning_bulletin
-from src.live_data_service import fetch_live_weather, construct_live_feature_vector
+from src.live_data_service import fetch_live_google_weather, construct_live_feature_vector
 from src.model_updater import record_live_observation, trigger_model_retraining, get_retraining_history
 
 # ---------------------------------------------------------
@@ -175,7 +175,7 @@ with st.sidebar:
 # Data Acquisition & State Resolution
 # ---------------------------------------------------------
 if mode == "🌦️ Live Weather + Project AI Forecast":
-    live_weather = fetch_live_weather()
+    live_weather = fetch_live_google_weather()
     current_time_str = live_weather.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M"))
     current_rain_mm = live_weather["current"]["current_rain_mm"]
     # Realistic operational elevation for Almatti Dam
