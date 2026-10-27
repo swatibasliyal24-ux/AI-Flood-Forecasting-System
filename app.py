@@ -550,8 +550,10 @@ with tabs[0]:
     before propagating downstream.
     """)
     
-    col_w1 = st.columns([1.1, 0.9])
+    col_w1, col_w2 = st.columns([1.1, 0.9])
     with col_w1:
+        st.image("proposed workflow.png", caption="System Workflow: 5-Stage Sequential AI Pipeline (as per Project Synopsis)", use_container_width=True)
+    with col_w2:
         st.markdown(f"""
         ### Multi-Stage Processing Pipeline:
         1. **Stage 1 (Rainfall Prediction):** Ingests historical NASA POWER daily precipitation & CWC hourly rainfall telemetry. Generates 1h, 6h, 12h, and 24h ahead rainfall forecasts harmonized with live Google Weather / ECMWF numerical weather forecasts.
