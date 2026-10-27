@@ -1,6 +1,6 @@
 """
 Live Data Service Module
-Fetches real-time weather observations and meteorological forecasts matching Google Weather
+Fetches real-time weather observations and meteorological forecasts from Open-Meteo
 for Almatti Reservoir (Lat: 16.33 N, Lon: 75.88 E).
 GNIT / AKTU Academic Mini Project
 """
@@ -38,10 +38,9 @@ WMO_CODE_MAP = {
 }
 
 
-def fetch_live_google_weather(lat=LATITUDE, lon=LONGITUDE):
+def fetch_live_weather(lat=LATITUDE, lon=LONGITUDE):
     """
-    Fetches real-time weather and 72-hour hourly forecasts from Open-Meteo / ECMWF global models
-    (the same underlying numerical weather prediction models used by Google Weather).
+    Fetches real-time weather observations and hourly forecasts from the Open-Meteo API.
     Coordinates: 16.33 N, 75.88 E (Almatti Dam).
     """
     url = (
@@ -76,7 +75,7 @@ def fetch_live_google_weather(lat=LATITUDE, lon=LONGITUDE):
                 "rain_probability_pct": prob
             })
 
-            # Calculate horizon rainfall forecasts matching Google Weather
+            # Summarize provider rainfall values for live feature engineering
             rain_1h = float(sum(precip[:1])) if len(precip) >= 1 else 0.0
             rain_6h = float(sum(precip[:6])) if len(precip) >= 6 else 0.0
             rain_12h = float(sum(precip[:12])) if len(precip) >= 12 else 0.0
@@ -84,7 +83,7 @@ def fetch_live_google_weather(lat=LATITUDE, lon=LONGITUDE):
 
             result = {
                 "status": "LIVE_ONLINE",
-                "source": "Open-Meteo ECMWF / Google Weather Benchmark API",
+                "source": "Open-Meteo API (ECMWF-based weather forecast)",
                 "coordinates": {"lat": lat, "lon": lon},
                 "location_name": "Almatti Dam, Krishna River, Karnataka",
                 "timestamp": curr.get("time", datetime.now().isoformat()),
@@ -150,6 +149,9 @@ def fetch_live_google_weather(lat=LATITUDE, lon=LONGITUDE):
         "daily_forecast": {}
     }
 
+
+# Backward-compatible alias for older project imports.
+fetch_live_google_weather = fetch_live_weather
 
 def construct_live_feature_vector(live_weather, current_water_level_m=516.8, prev_water_level_m=516.7):
     """

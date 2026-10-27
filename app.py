@@ -17,7 +17,7 @@ from streamlit_folium import st_folium
 
 # Import project modules
 from src.data_loader import ALMATTI_METADATA, BASIN_STATIONS, load_cwc_water_level, load_nasa_rainfall
-from src.stage1_rainfall import Stage1RainfallForecaster, harmonize_with_google_forecast
+from src.stage1_rainfall import Stage1RainfallForecaster
 from src.stage2_water_level import Stage2WaterLevelForecaster
 from src.stage3_water_behaviour import WaterBehaviourAnalyzer
 from src.stage4_risk_assessment import FloodRiskClassifier
@@ -25,7 +25,7 @@ import importlib
 import src.stage5_gis_warning
 importlib.reload(src.stage5_gis_warning)
 from src.stage5_gis_warning import generate_gis_map, generate_early_warning_bulletin
-from src.live_data_service import fetch_live_google_weather, construct_live_feature_vector
+from src.live_data_service import fetch_live_weather, construct_live_feature_vector
 from src.model_updater import record_live_observation, trigger_model_retraining, get_retraining_history
 
 # ---------------------------------------------------------
@@ -147,7 +147,7 @@ with st.sidebar:
     
     mode = st.radio(
         "Operating Mode",
-        ["🌐 Live Google Weather Telemetry", "📊 Historical Peak Flood Event", "⚡ Stress-Test Simulator"],
+        ["🌦️ Live Weather + Project AI Forecast", "📊 Historical Peak Flood Event", "⚡ Stress-Test Simulator"],
         index=0
     )
     
@@ -174,8 +174,8 @@ with st.sidebar:
 # ---------------------------------------------------------
 # Data Acquisition & State Resolution
 # ---------------------------------------------------------
-if mode == "🌐 Live Google Weather Telemetry":
-    live_weather = fetch_live_google_weather()
+if mode == "🌦️ Live Weather + Project AI Forecast":
+    live_weather = fetch_live_weather()
     current_time_str = live_weather.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M"))
     current_rain_mm = live_weather["current"]["current_rain_mm"]
     # Realistic operational elevation for Almatti Dam
@@ -184,25 +184,28 @@ if mode == "🌐 Live Google Weather Telemetry":
     rate_rise_h = (sim_wl - sim_prev_wl) * 100.0  # cm/h
     
     live_features = construct_live_feature_vector(live_weather, sim_wl, sim_prev_wl)
-    google_horizons = live_weather.get("forecast_horizons_mm", {1: 0.0, 6: 0.0, 12: 0.0, 24: 0.0})
-    
-    # Stage 1 Forecast: Calibrated tightly with Google Weather
-    if s1_model:
-        try:
-            s1_raw_forecast = s1_model.predict(live_features, google_forecast_horizons=google_horizons)
-        except TypeError:
-            try:
-                s1_raw_forecast = s1_model.predict(live_features)
-            except Exception:
-                s1_raw_forecast = google_horizons
-    else:
-        s1_raw_forecast = google_horizons
-    
-    # Harmonize with live Google Weather forecast
-    hourly_precip_list = live_weather["hourly_forecast_df"]["precipitation_mm"].tolist() if "hourly_forecast_df" in live_weather else None
-    stage1_rain_ensemble = harmonize_with_google_forecast(s1_raw_forecast, hourly_precip_list)
-    stage1_rain_forecast = {h: v["blended_mm"] for h, v in stage1_rain_ensemble.items()}
-    
+    # Stage 1: Use only the trained project AI model. No provider blending/comparison.
+    if s1_model is None:
+        st.error("Rainfall AI model could not be loaded. Check models/stage1_rainfall.joblib.")
+        st.stop()
+
+    try:
+        s1_raw_forecast = s1_model.predict(live_features)
+        stage1_rain_forecast = {}
+        for h in [1, 6, 12, 24]:
+            value = s1_raw_forecast.get(h, s1_raw_forecast.get(str(h))) if isinstance(s1_raw_forecast, dict) else None
+            if isinstance(value, dict):
+                value = value.get("prediction_mm", value.get("rainfall_mm", value.get("predicted_mm")))
+            if value is None or not np.isfinite(float(value)):
+                raise ValueError(
+                    f"AI model did not produce a valid prediction for the {h}-hour horizon. "
+                    "Check that live feature names and values match the training data."
+                )
+            stage1_rain_forecast[h] = max(0.0, float(value))
+    except Exception as exc:
+        st.error(f"Project AI rainfall prediction failed: {exc}")
+        st.stop()
+
     # Stage 2 Forecast (Hydrological residual with high precision)
     if s2_model:
         try:
@@ -225,10 +228,6 @@ elif mode == "📊 Historical Peak Flood Event":
     current_rain_mm = 38.5
     
     stage1_rain_forecast = {1: 15.0, 6: 62.0, 12: 95.0, 24: 145.0}
-    stage1_rain_ensemble = {
-        h: {"ai_pred_mm": v, "google_pred_mm": v * 0.95, "blended_mm": v}
-        for h, v in stage1_rain_forecast.items()
-    }
     stage2_wl_forecast = {
         "current_wl": sim_wl,
         1: 519.38,
@@ -258,10 +257,6 @@ else:  # Extreme Event Stress-Test Simulator
     
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M") + " [SIMULATION DRILL]"
     stage1_rain_forecast = {1: sim_24h_rain / 12.0, 6: sim_24h_rain / 3.0, 12: sim_24h_rain / 1.6, 24: sim_24h_rain}
-    stage1_rain_ensemble = {
-        h: {"ai_pred_mm": v, "google_pred_mm": v, "blended_mm": v}
-        for h, v in stage1_rain_forecast.items()
-    }
     
     rise_m = (rate_rise_h / 100.0)
     stage2_wl_forecast = {
@@ -381,7 +376,7 @@ with c3:
     st.metric(
         label="🌧️ 24h Rain Forecast",
         value=f"{stage1_rain_forecast.get(24, 0.0):.1f} mm",
-        delta="98.8% Google Match"
+        delta="Project AI model"
     )
 with c4:
     st.metric(
@@ -556,7 +551,7 @@ with tabs[0]:
     with col_w2:
         st.markdown(f"""
         ### Multi-Stage Processing Pipeline:
-        1. **Stage 1 (Rainfall Prediction):** Ingests historical NASA POWER daily precipitation & CWC hourly rainfall telemetry. Generates 1h, 6h, 12h, and 24h ahead rainfall forecasts harmonized with live Google Weather / ECMWF numerical weather forecasts.
+        1. **Stage 1 (Rainfall Prediction):** Ingests historical NASA POWER daily precipitation & CWC hourly rainfall telemetry. Generates independent 1h, 6h, 12h, and 24h rainfall estimates using the trained project AI model. Live weather observations are input features only; provider forecasts are not blended into the AI output.
         2. **Stage 2 (Water-Level Prediction):** Uses forecasted rainfall, antecedent reservoir water level lags, rate of rise, and upstream Western Ghats river telemetry to forecast water level 1h, 6h, 12h, and 24h ahead ($R^2 = 0.989$).
         3. **Stage 3 (Water Behaviour Analysis):** Computes physical hydraulic parameters: effective water depth above riverbed, rise velocity ($\\Delta h / \\Delta t$), live storage volume in TMC, flow velocity, East-Southeast Krishna flow direction, and expanding flood spread surface area ($\\text{{km}}^2$).
         4. **Stage 4 (Flood Risk Assessment):** Evaluates multi-criteria Flood Risk Index (FRI: 0–100) combining water level proximity to FRL (55%), predicted rainfall (25%), and rate of rise (20%). Classifies risk into **Low**, **Medium**, or **High** and identifies specific vulnerable taluks.
@@ -597,85 +592,72 @@ with tabs[0]:
 # ---------------------------------------------------------
 with tabs[1]:
     st.subheader("Stage 1: Multi-Horizon Rainfall Prediction")
-    st.markdown("""
-    Predict future rainfall conditions using historical NASA POWER daily time series, CWC telemetry,
-    and cyclical seasonal encodings. In live mode, AI model predictions are harmonized with live Google Weather / Open-Meteo forecasts.
-    """)
-    
-    st.markdown("""
-    <div style="background: #ecfdf5; border: 1px solid #10b981; border-radius: 10px; padding: 12px 18px; margin-bottom: 16px; color: #065f46;">
-        <b>🎯 High-Precision Forecast Match:</b> Stage 1 AI rainfall model has been calibrated with Google Weather / ECMWF numerical weather forecasts to achieve <b>~98.8% agreement</b> (Average error &Delta; &lt; 0.04 mm), matching the high reliability of the Stage 2 water-level prediction model.
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        "The live mode displays predictions from the trained project AI model only. "
+        "Live weather observations are used as input features; external forecast values are not blended into AI predictions."
+    )
+
+    if mode == "🌦️ Live Weather + Project AI Forecast":
+        st.success("Forecast source: trained project AI model (XGBoost). No external forecast comparison or blending.")
+    elif mode == "📊 Historical Peak Flood Event":
+        st.warning("Historical replay mode: rainfall values are predefined scenario values, not live AI predictions.")
+    else:
+        st.warning("Stress-test mode: rainfall values are controlled by simulator inputs, not live AI predictions.")
 
     col_r1, col_r2 = st.columns([1.25, 0.75])
     with col_r1:
-        st.markdown("#### Forecast Comparison: Stage 1 AI vs Google Weather")
-        
-        # Build alignment comparison table
-        align_rows = []
-        for h in [1, 6, 12, 24]:
-            item = stage1_rain_ensemble.get(h, {})
-            g_val = item.get("google_pred_mm", 0.0)
-            ai_val = item.get("ai_pred_mm", 0.0)
-            delta = item.get("delta_mm", round(abs(ai_val - g_val), 2))
-            pct = item.get("match_pct", 100.0 if delta == 0 else 98.5)
-            status = "🟢 Exact Match" if delta == 0.0 else ("🟢 98%+ Match" if delta <= 0.1 else "🟡 Close Alignment")
-            align_rows.append({
-                "Forecast Horizon": f"+{h} Hour{'s' if h > 1 else ''}",
-                "Google Weather Forecast": f"{g_val:.2f} mm",
-                "Stage 1 AI Calibrated": f"{ai_val:.2f} mm",
-                "Absolute Error (Δ)": f"{delta:.2f} mm",
-                "Match Agreement": f"{pct:.1f}%",
-                "Status": status
-            })
-        st.dataframe(pd.DataFrame(align_rows), use_container_width=True, hide_index=True)
-        
-        # Plot multi-horizon rainfall comparison
+        st.markdown("#### Rainfall Forecast by Horizon")
+        forecast_rows = [
+            {"Forecast Horizon": f"+{h} hour{'s' if h > 1 else ''}",
+             "Predicted Rainfall (mm)": round(float(stage1_rain_forecast[h]), 2)}
+            for h in [1, 6, 12, 24]
+        ]
+        st.dataframe(pd.DataFrame(forecast_rows), use_container_width=True, hide_index=True)
+
         fig_rf = go.Figure()
         fig_rf.add_trace(go.Bar(
             x=[f"+{h}h" for h in [1, 6, 12, 24]],
-            y=[stage1_rain_ensemble[h]["google_pred_mm"] for h in [1, 6, 12, 24]],
-            name="Google / ECMWF Weather Forecast",
-            marker_color="#0284c7"
-        ))
-        fig_rf.add_trace(go.Bar(
-            x=[f"+{h}h" for h in [1, 6, 12, 24]],
-            y=[stage1_rain_ensemble[h]["ai_pred_mm"] for h in [1, 6, 12, 24]],
-            name="Stage 1 AI Model (Calibrated)",
+            y=[stage1_rain_forecast[h] for h in [1, 6, 12, 24]],
+            name="Project rainfall forecast",
             marker_color="#10b981"
         ))
         fig_rf.update_layout(
-            barmode="group",
-            title="Stage 1 AI Model vs Google Meteorological Forecast Alignment",
+            title="Project Rainfall Forecast (No External Forecast Blending)",
             xaxis_title="Prediction Horizon Ahead",
-            yaxis_title="Accumulated Rainfall (mm)",
+            yaxis_title="Rainfall (mm)",
             height=340,
             margin=dict(l=20, r=20, t=40, b=20)
         )
         st.plotly_chart(fig_rf, use_container_width=True)
 
-
     with col_r2:
-        st.markdown("#### Live Weather Diagnostics (Lat 16.33, Lon 75.88)")
+        st.markdown("#### Weather Input Diagnostics (Almatti Reservoir)")
         curr_w = live_weather.get("current", {})
-        st.info(f"""
-        - **Source:** {live_weather.get('source', 'Live Open-Meteo')}
-        - **Observed Timestamp:** `{current_time_str}`
-        - **Condition:** **{curr_w.get('weather_condition', 'Partly Cloudy')}**
-        - **Temperature:** {curr_w.get('temperature_c', 30.0)} °C
-        - **Relative Humidity:** {curr_w.get('humidity_pct', 45)} %
-        - **Wind Speed:** {curr_w.get('wind_speed_kmh', 14.0)} km/h
-        - **Surface Pressure:** {curr_w.get('surface_pressure_hpa', 958.0)} hPa
-        - **Current Precipitation:** {curr_w.get('current_rain_mm', 0.0)} mm/h
-        """)
-        
-        # Display Stage 1 Model Metrics
-        st.markdown("#### Stage 1 Model Evaluation Metrics")
+        source = live_weather.get("source", "Project weather service")
+        st.info(
+            f"- **Weather data source:** {source}\n"
+            f"- **Timestamp:** `{current_time_str}`\n"
+            f"- **Condition:** **{curr_w.get('weather_condition', 'Unavailable')}**\n"
+            f"- **Temperature:** {curr_w.get('temperature_c', 'N/A')} °C\n"
+            f"- **Relative Humidity:** {curr_w.get('humidity_pct', 'N/A')} %\n"
+            f"- **Wind Speed:** {curr_w.get('wind_speed_kmh', 'N/A')} km/h\n"
+            f"- **Surface Pressure:** {curr_w.get('surface_pressure_hpa', 'N/A')} hPa\n"
+            f"- **Current Precipitation:** {curr_w.get('current_rain_mm', 'N/A')} mm/h\n"
+            f"- **Data status:** {live_weather.get('status', 'UNKNOWN')}"
+        )
+        if live_weather.get("status") != "LIVE_ONLINE" and mode == "🌦️ Live Weather + Project AI Forecast":
+            st.warning("Live weather API is unavailable. The service is using offline fallback data; treat this output as a prototype estimate, not a live forecast.")
+
+        st.markdown("#### Stage 1 AI Model Evaluation Metrics")
         if s1_model and s1_model.metrics:
             m_df = pd.DataFrame(s1_model.metrics).T
-            m_df = m_df.rename(columns={"horizon_hours": "Horizon", "mae_mm": "MAE (mm)", "rmse_mm": "RMSE (mm)", "r2_score": "R²", "f1_score": "F1 (Rain Event)"})
-            st.dataframe(m_df[["Horizon", "MAE (mm)", "RMSE (mm)", "F1 (Rain Event)"]], use_container_width=True, hide_index=True)
+            m_df = m_df.rename(columns={
+                "horizon_hours": "Horizon", "mae_mm": "MAE (mm)",
+                "rmse_mm": "RMSE (mm)", "r2_score": "R²",
+                "f1_score": "F1 (Rain Event)"
+            })
+            metric_cols = [c for c in ["Horizon", "MAE (mm)", "RMSE (mm)", "R²", "F1 (Rain Event)"] if c in m_df.columns]
+            st.dataframe(m_df[metric_cols], use_container_width=True, hide_index=True)
 
 
 # ---------------------------------------------------------
