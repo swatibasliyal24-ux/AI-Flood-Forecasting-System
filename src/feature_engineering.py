@@ -72,159 +72,67 @@ def prepare_stage1_rainfall_features(
     rain_col="Rainfall_Hourly_mm",
     horizons=[1, 6, 12, 24],
 ):
+    """Prepare leakage-safe rainfall targets from hourly historical weather.
+
+    Features are only information available at timestamp t: calendar, current
+    rainfall and current meteorological observations. Targets are accumulated
+    rainfall over the next 1/6/12/24 hours. No future rainfall is used as a
+    feature and no missing observation is silently converted to zero.
     """
-    Build hourly rainfall forecasting features.
-
-    Targets:
-        target_rain_1h  = rainfall at t+1
-        target_rain_6h  = total rainfall from t+1 to t+6
-        target_rain_12h = total rainfall from t+1 to t+12
-        target_rain_24h = total rainfall from t+1 to t+24
-
-    Rows without observed rainfall needed for feature or target
-    construction are excluded rather than assumed to be dry.
-    """
-
     if rain_col not in df.columns:
-        raise ValueError(
-            f"Required rainfall column '{rain_col}' is missing."
-        )
+        raise ValueError(f"Required rainfall column '{rain_col}' is missing.")
+    if not isinstance(df.index, pd.DatetimeIndex):
+        if "DateTime" in df.columns:
+            df = df.copy()
+            df["DateTime"] = pd.to_datetime(df["DateTime"], errors="coerce")
+            df = df.dropna(subset=["DateTime"]).set_index("DateTime")
+        else:
+            raise ValueError("Rainfall data must have a DateTime index or DateTime column.")
 
     data = df.copy().sort_index()
-
-    data[rain_col] = pd.to_numeric(
-        data[rain_col],
-        errors="coerce",
-    )
-
+    data = data[~data.index.duplicated(keep="last")]
+    data[rain_col] = pd.to_numeric(data[rain_col], errors="coerce")
     data.loc[data[rain_col] < 0, rain_col] = np.nan
-
     data = add_cyclical_calendar_features(data)
 
-    # Keep missing rainfall missing.
-    rainfall = data[rain_col]
+    # Use a consistent feature name between the historical dataset and live API.
+    data["Rainfall_Hourly_mm"] = data[rain_col]
+    weather_features = [
+        "Rainfall_Hourly_mm", "Temperature_C", "Humidity_pct",
+        "Pressure_hPa", "WindSpeed_kmh",
+    ]
+    for col in weather_features:
+        if col not in data.columns:
+            data[col] = np.nan
 
-    # -----------------------------------------------------
-    # Historical rainfall lags
-    # -----------------------------------------------------
-
-    for lag in [1, 2, 3, 6, 12, 24]:
-        data[f"rain_lag_{lag}h"] = rainfall.shift(lag)
-
-    # -----------------------------------------------------
-    # Historical rainfall rolling statistics
-    # -----------------------------------------------------
-
-    for window in [3, 6, 12, 24, 48]:
-        data[f"rain_sum_{window}h"] = (
-            rainfall.rolling(
-                window=window,
-                min_periods=window,
-            ).sum()
-        )
-
-        data[f"rain_mean_{window}h"] = (
-            rainfall.rolling(
-                window=window,
-                min_periods=window,
-            ).mean()
-        )
-
-        data[f"rain_max_{window}h"] = (
-            rainfall.rolling(
-                window=window,
-                min_periods=window,
-            ).max()
-        )
-
-    data["rain_diff_1h"] = (
-        rainfall - data["rain_lag_1h"]
-    )
-
-    data["rain_diff_6h"] = (
-        rainfall - data["rain_lag_6h"]
-    )
-
-    # -----------------------------------------------------
-    # Atmospheric meteorological features (if available)
-    # -----------------------------------------------------
-    if "Pressure_hPa" in data.columns:
-        data["pressure_tendency_3h"] = (data["Pressure_hPa"] - data["Pressure_hPa"].shift(3)).bfill().ffill()
-    if "Humidity_pct" in data.columns:
-        data["humidity_lag_3h"] = data["Humidity_pct"].shift(3).bfill().ffill()
-        if "Temperature_C" in data.columns:
-            data["dew_point_approx"] = data["Temperature_C"] - ((100.0 - data["Humidity_pct"]) / 5.0)
-
-    # -----------------------------------------------------
-    # Numerical Weather Prediction (NWP) Google Reference Features
-    # -----------------------------------------------------
-    for h in horizons:
-        # Reference forecast baseline representing ECMWF / Google Weather signal
-        future_h = rainfall.shift(-1).iloc[::-1].rolling(h, min_periods=h).sum().iloc[::-1]
-        np.random.seed(42 + h)
-        noise = np.random.normal(0, 0.04 * (future_h.std() if future_h.std() > 0 else 0.1), len(data))
-        data[f"nwp_ref_{h}h"] = np.clip(future_h + noise, 0, None)
-
-
-    # -----------------------------------------------------
-    # Correct future rainfall targets
-    # -----------------------------------------------------
+    feature_cols = [
+        "sin_doy", "cos_doy", "sin_month", "cos_month",
+        "sin_hour", "cos_hour", "is_monsoon",
+        *weather_features,
+    ]
 
     target_cols = []
-
+    future_rain = data["Rainfall_Hourly_mm"].shift(-1)
     for horizon in horizons:
         target_col = f"target_rain_{horizon}h"
-
-        # Shift by one hour so the current observation is
-        # excluded from the future rainfall target.
-        future_rain = rainfall.shift(-1)
-
         data[target_col] = (
             future_rain.iloc[::-1]
-            .rolling(
-                window=horizon,
-                min_periods=horizon,
-            )
+            .rolling(window=horizon, min_periods=horizon)
             .sum()
             .iloc[::-1]
         )
-
         target_cols.append(target_col)
-
-    # -----------------------------------------------------
-    # Select features and remove invalid training rows
-    # -----------------------------------------------------
-
-    excluded_cols = set(
-        target_cols + [rain_col, "Date"]
-    )
-
-    feature_cols = [
-        col for col in data.columns
-        if col not in excluded_cols
-        and not col.startswith("target_")
-    ]
-
-    # Missing rainfall features or future targets must not
-    # silently be interpreted as zero rainfall.
-    required_cols = (
-        feature_cols + target_cols
-    )
 
     clean_data = (
         data.replace([np.inf, -np.inf], np.nan)
-        .dropna(subset=required_cols)
+        .dropna(subset=feature_cols + target_cols)
         .copy()
     )
-
     if clean_data.empty:
         raise ValueError(
-            "No valid Stage 1 training samples remain. "
-            "The CWC hourly rainfall observations are too sparse "
-            "for these lag and forecast windows. Obtain more "
-            "hourly observations or use a verified hourly dataset."
+            "No valid rainfall samples remain. Check that the hourly weather CSV "
+            "contains precipitation and meteorological columns."
         )
-
     return clean_data, feature_cols, target_cols
 
 

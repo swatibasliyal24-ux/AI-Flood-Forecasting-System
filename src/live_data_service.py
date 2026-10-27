@@ -213,6 +213,10 @@ def construct_live_feature_vector(live_weather, current_water_level_m=516.8, pre
 
         # Rainfall accumulations
         "Rainfall_Hourly_mm": curr.get("current_rain_mm", 0.0),
+        "Temperature_C": curr.get("temperature_c", np.nan),
+        "Humidity_pct": curr.get("humidity_pct", np.nan),
+        "Pressure_hPa": curr.get("surface_pressure_hpa", np.nan),
+        "WindSpeed_kmh": curr.get("wind_speed_kmh", np.nan),
         "rain_lag_1h": curr.get("current_rain_mm", 0.0),
         "rain_lag_2h": 0.0,
         "rain_lag_3h": 0.0,
